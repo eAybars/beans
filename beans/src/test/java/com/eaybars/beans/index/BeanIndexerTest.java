@@ -154,6 +154,16 @@ public class BeanIndexerTest {
 
 	assertEquals(1, result.size());
 	assertTrue(result.contains(new IndexedBean1("abc", 1)));
+        
+	b1.remove(new IndexedBean1("abc", 1));
+	result = b1.filter().having("name", "abc").results();
+        assertTrue(result.isEmpty());
+        
+        Set<Object> values = b1.propertyValues("name");
+        assertEquals(2, values.size());
+        assertTrue(values.contains("xyz"));
+        assertTrue(values.contains("qwerty"));
+        
     }
     
     @Test

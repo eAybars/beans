@@ -291,7 +291,14 @@ public class BeanIndexer<K> {
             for (Entry<String, Map<Object, Set<K>>> e : index.entrySet()) {
                 for (Object value : retrievePropertyValueAsCollection(
                         e.getKey(), element)) {
-                    e.getValue().get(value).remove(element);
+                    Set<K> elementSet = e.getValue().get(value);
+                    if (elementSet != null) {//if no more element exists for the given index value 
+                                             //or element has been modified after indexing is done
+                        elementSet.remove(element);
+                        if (elementSet.isEmpty()) {
+                            e.getValue().remove(value);
+                        }
+                    }
                 }
             }
         }
@@ -374,7 +381,7 @@ public class BeanIndexer<K> {
         }
         return Collections.unmodifiableSet(values.keySet());
     }
-    
+
     public Set<String> getAllIndexes() {
         return Collections.unmodifiableSet(index.keySet());
     }
