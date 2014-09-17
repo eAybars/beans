@@ -9,20 +9,18 @@ import com.eaybars.beans.properties.BeanProperty;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.lang.reflect.InvocationTargetException;
+import java.util.AbstractSet;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NavigableMap;
 import java.util.NavigableSet;
 import java.util.NoSuchElementException;
 import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
 
 /**
  * BeanIndexer is used to index bean properties and enable searching on those
@@ -38,23 +36,37 @@ import java.util.TreeSet;
  * @author Ertunc
  * @param <K>
  */
-public class BeanIndexer<K> {
+public class BeanIndexer<K> extends AbstractSet<K> implements Set<K> {
 
-    private Set<K> elements;
+    private CollectionFactory factory;
     private Class<K> beanClass;
+    private Set<K> elements;
     private Map<String, Map<Object, Set<K>>> index;
     private PropertyListener listener;
     private BeanEvent<PropertyChangeListener> beanEvent;
 
     /**
-     * Create a new BeanIndexer for the given class with no indexed properties
+     * Create a new thread unsafe BeanIndexer for the given class with no
+     * indexed properties
      *
      * @param beanClass
      */
     public BeanIndexer(Class<K> beanClass) {
-        elements = new HashSet<K>();
-        index = new HashMap<String, Map<Object, Set<K>>>();
+        this(beanClass, CollectionFactory.Predefined.THREAD_UNSAFE.getFactory());
+    }
+
+    /**
+     * Creates a new BeanIndexer which has no index and uses the given factory
+     * to generate its backing collections
+     *
+     * @param beanClass
+     * @param factory
+     */
+    public BeanIndexer(Class<K> beanClass, CollectionFactory factory) {
         this.beanClass = beanClass;
+        this.factory = factory;
+        elements = factory.createNewSet();
+        index = factory.createNewMap();
         try {
             beanEvent = getBeanEvent(beanClass, PropertyChangeListener.class);
             listener = new PropertyListener();
@@ -63,8 +75,9 @@ public class BeanIndexer<K> {
     }
 
     /**
-     * Creates a new BeanIndexer by searching the given class and automatically
-     * adding properties as sorted or unsorted indexes according to the declared
+     * Creates a new tread unsafe BeanIndexer by searching the given class and
+     * automatically adding properties as sorted or unsorted indexes according
+     * to the annotations.
      *
      * @Index annotations.
      *
@@ -75,10 +88,26 @@ public class BeanIndexer<K> {
     public static <T> BeanIndexer<T> beanIndexFrom(Class<T> clazz) {
         BeanIndexer<T> instance = new BeanIndexer<T>(clazz);
         instance.scanAndAddIndexes(null, false);
+        return beanIndexFrom(clazz, CollectionFactory.Predefined.THREAD_UNSAFE.getFactory());
+    }
+
+    /**
+     * Creates a new BeanIndexer with the given factory by searching the given
+     * class and automatically adding properties as sorted or unsorted indexes
+     * according to the annotations
+     *
+     * @param <T>
+     * @param clazz
+     * @param factory
+     * @return
+     */
+    public static <T> BeanIndexer<T> beanIndexFrom(Class<T> clazz, CollectionFactory factory) {
+        BeanIndexer<T> instance = new BeanIndexer<T>(clazz, factory);
+        instance.scanAndAddIndexes(null, false);
         return instance;
     }
 
-    private void scanAndAddIndexes(BeanProperty parent,
+    protected void scanAndAddIndexes(BeanProperty parent,
             boolean checkBeforeIndexing) {
         Class<?> clazz = getPropertyClass(parent);
         Index classIndex = clazz.getAnnotation(Index.class);
@@ -146,7 +175,8 @@ public class BeanIndexer<K> {
 
     /**
      * Adds a sorted index on the given property to enable range searching on
-     * the property
+     * the property. If a sorted index already exists, no action is taken. If an
+     * unsorted index already exist, an IllegalStateException is thrown
      *
      * @param property
      * @param comparator
@@ -155,15 +185,21 @@ public class BeanIndexer<K> {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public BeanIndexer<K> addSortedIndex(String property,
             Comparator<?> comparator) {
-        Map<Object, Set<K>> holder = index.get(property);
-        if (holder instanceof NavigableMap<?, ?>) {
-            return this;
+        Map<Object, Set<K>> holder;
+        synchronized (this) {
+            holder = index.get(property);
+            if (holder == null) {
+                index.put(property, factory.createNewNavigableMap(comparator));
+            }
         }
         if (holder != null) {
-            removeIndex(property);
+            if (holder instanceof NavigableMap<?, ?>) {
+                return this;
+            } else {
+                throw new IllegalStateException("An unsorted index for the property already exists: "
+                        + property);
+            }
         }
-        holder = new TreeMap<Object, Set<K>>((Comparator) comparator);
-        index.put(property, holder);
         indexBeans(property, elements);
         return this;
 
@@ -171,21 +207,29 @@ public class BeanIndexer<K> {
 
     /**
      * Adds an unsorted index on the given property which can only be used with
-     * exact match searching
+     * exact match searching. If an unsorted index already exists, no action is
+     * taken. If a sorted index already exist, an IllegalStateException is
+     * thrown
      *
      * @param property
      * @return
      */
     public BeanIndexer<K> addUnsortedIndex(String property) {
-        Map<Object, Set<K>> holder = index.get(property);
-        if (holder != null && !(holder instanceof NavigableMap<?, ?>)) {
-            return this;
+        Map<Object, Set<K>> holder;
+        synchronized (this) {
+            holder = index.get(property);
+            if (holder == null) {
+                index.put(property, factory.createNewMap());
+            }
         }
         if (holder != null) {
-            removeIndex(property);
+            if (!(holder instanceof NavigableMap<?, ?>)) {
+                return this;
+            } else {
+                throw new IllegalStateException("A sorted index for the property already exists: "
+                        + property);
+            }
         }
-        holder = new HashMap<Object, Set<K>>();
-        index.put(property, holder);
         indexBeans(property, elements);
         return this;
     }
@@ -200,15 +244,6 @@ public class BeanIndexer<K> {
     public BeanIndexer<K> removeIndex(String property) {
         index.remove(property);
         return this;
-    }
-
-    /**
-     * Returns all elements which are added to this indexer
-     *
-     * @return
-     */
-    public Set<K> getElements() {
-        return Collections.unmodifiableSet(elements);
     }
 
     private void indexBeans(String property, Collection<K> elements) {
@@ -227,42 +262,22 @@ public class BeanIndexer<K> {
     private void addToMap(Map<Object, Set<K>> map, Object key, K element) {
         Set<K> collection = map.get(key);
         if (collection == null) {
-            collection = new HashSet<K>();
+            collection = factory.createNewSet();
             map.put(key, collection);
         }
         collection.add(element);
     }
 
-    /**
-     * Adds all the elements to this indexer. No action is taken for the already
-     * present elements. This method calls add method of this indexer for each
-     * element of the given collection
-     *
-     * @param beans
-     * @return
-     */
-    public BeanIndexer<K> addAll(Collection<K> beans) {
-        for (K bean : beans) {
-            add(bean);
-        }
-        return this;
-    }
-
-    /**
-     * Adds the given element to this indexer. If the given element is already
-     * added, no action is taken
-     *
-     * @param bean
-     * @return
-     */
-    public BeanIndexer<K> add(K bean) {
+    @Override
+    public boolean add(K bean) {
         if (elements.add(bean)) {
             addListener(bean);
             for (Entry<String, Map<Object, Set<K>>> e : index.entrySet()) {
                 indexBean(e.getKey(), e.getValue(), bean);
             }
+            return true;
         }
-        return this;
+        return false;
     }
 
     private void addListener(K bean) {
@@ -275,37 +290,33 @@ public class BeanIndexer<K> {
         }
     }
 
-    /**
-     * Removes the given element from the indexer. If no such element exist, no
-     * action is taken. After an element is removed from the indexer, all its
-     * indexed property values are also removed from the indexer. Therefore this
-     * element becomes eligible for garbage collection and will not show up in
-     * any search result
-     *
-     * @param element
-     * @return
-     */
-    public BeanIndexer<K> remove(K element) {
+    @Override
+    public boolean remove(Object element) {
         if (elements.remove(element)) {
-            removeListener(element);
-            for (Entry<String, Map<Object, Set<K>>> e : index.entrySet()) {
-                for (Object value : retrievePropertyValueAsCollection(
-                        e.getKey(), element)) {
-                    Set<K> elementSet = e.getValue().get(value);
-                    if (elementSet != null) {//if no more element exists for the given index value 
-                                             //or element has been modified after indexing is done
-                        elementSet.remove(element);
-                        if (elementSet.isEmpty()) {
-                            e.getValue().remove(value);
-                        }
+            removeImpl(element);
+            return true;
+        }
+        return false;
+    }
+
+    private void removeImpl(Object element) {
+        removeListener(element);
+        for (Entry<String, Map<Object, Set<K>>> e : index.entrySet()) {
+            for (Object value : retrievePropertyValueAsCollection(
+                    e.getKey(), element)) {
+                Set<K> elementSet = e.getValue().get(value);
+                if (elementSet != null) {//if no more element exists for the given index value 
+                    //or element has been modified after indexing is done
+                    elementSet.remove(element);
+                    if (elementSet.isEmpty()) {
+                        e.getValue().remove(value);
                     }
                 }
             }
         }
-        return this;
     }
 
-    private void removeListener(K bean) {
+    private void removeListener(Object bean) {
         if (listener != null) {
             try {
                 beanEvent.removeListener(bean, listener);
@@ -315,26 +326,8 @@ public class BeanIndexer<K> {
         }
     }
 
-    /**
-     * Calls the remove method of this indexer for each element of the given
-     * collection
-     *
-     * @param elements
-     * @return
-     */
-    public BeanIndexer<K> removeAll(Collection<K> elements) {
-        for (K element : elements) {
-            remove(element);
-        }
-        return this;
-    }
-
-    /**
-     * Removes all previously added elements from this indexer.
-     *
-     * @return
-     */
-    public BeanIndexer<K> clear() {
+    @Override
+    public void clear() {
         for (Map<Object, Set<K>> map : index.values()) {
             map.clear();
         }
@@ -345,7 +338,6 @@ public class BeanIndexer<K> {
             }
         }
         elements.clear();
-        return this;
     }
 
     /**
@@ -358,7 +350,7 @@ public class BeanIndexer<K> {
     }
 
     private Collection<?> retrievePropertyValueAsCollection(String property,
-            K element) {
+            Object element) {
         Object value = retrievePropertyValue(property, element);
         return value instanceof Collection<?> ? (Collection<?>) value : Arrays
                 .asList(value);
@@ -372,7 +364,7 @@ public class BeanIndexer<K> {
      * @return
      * @throws IllegalArgumentException
      */
-    public Set<Object> propertyValues(String property)
+    public Set<Object> getAllValuesForProperty(String property)
             throws IllegalArgumentException {
         Map<Object, Set<K>> values = index.get(property);
         if (values == null) {
@@ -395,13 +387,67 @@ public class BeanIndexer<K> {
      * @param element
      * @return
      */
-    protected Object retrievePropertyValue(String property, K element) {
+    protected Object retrievePropertyValue(String property, Object element) {
         BeanProperty bProperty = getProperty(beanClass, property);
         try {
             return bProperty.getValue(element);
         } catch (InvocationTargetException e) {
             throw new RuntimeException(e.getCause());
         }
+    }
+
+    @Override
+    public int size() {
+        return this.elements.size();
+    }
+
+    @Override
+    public boolean contains(Object o) {
+        return this.elements.contains(o);
+    }
+
+    @Override
+    public Iterator<K> iterator() {
+        return new Iterator() {
+            Iterator<K> delegate = elements.iterator();
+            K lastElement = null;
+
+            @Override
+            public boolean hasNext() {
+                return delegate.hasNext();
+            }
+
+            @Override
+            public K next() {
+                return lastElement = delegate.next();
+            }
+
+            @Override
+            public void remove() {
+                delegate.remove();
+                removeImpl(lastElement);
+            }
+        };
+    }
+
+    @Override
+    public boolean isEmpty() {
+        return elements.isEmpty();
+    }
+
+    @Override
+    public Object[] toArray() {
+        return elements.toArray();
+    }
+
+    @Override
+    public <T> T[] toArray(T[] a) {
+        return elements.toArray(a);
+    }
+
+    @Override
+    public boolean containsAll(Collection<?> c) {
+        return elements.containsAll(c);
     }
 
     private interface SearchState<K> {
@@ -421,7 +467,7 @@ public class BeanIndexer<K> {
             new OrSearchState()};
 
         public Search() {
-            this(new HashSet<K>());
+            this(factory.createNewSet());
             filter = new Filter(this);
         }
 
@@ -450,7 +496,8 @@ public class BeanIndexer<K> {
          * @return
          */
         public Search inverse() {
-            HashSet<K> inverse = new HashSet<K>(elements);
+            Set<K> inverse = factory.createNewSet();
+            inverse.addAll(elements);
             inverse.removeAll(result);
             result = inverse;
             return this;
@@ -496,18 +543,20 @@ public class BeanIndexer<K> {
          * @return
          */
         public NavigableSet<K> sortedResults() {
-            return new TreeSet<K>(result);
+            NavigableSet<K> set = factory.createNewNavigableSet(null);
+            set.addAll(result);
+            return set;
         }
 
         /**
          * Retrieves the results as a sorted set, comparing the elements
-         * according to the gicen comparator
+         * according to the given comparator
          *
          * @param comparator
          * @return
          */
         public NavigableSet<K> sortedResults(Comparator<K> comparator) {
-            NavigableSet<K> sorteResult = new TreeSet<K>(comparator);
+            NavigableSet<K> sorteResult = factory.createNewNavigableSet(comparator);
             sorteResult.addAll(result);
             return sorteResult;
         }
@@ -531,7 +580,7 @@ public class BeanIndexer<K> {
 
             @Override
             public void add(Collection<Set<K>> elements) {
-                HashSet<K> all = new HashSet<K>();
+                Set<K> all = factory.createNewSet();
                 for (Set<K> e : elements) {
                     all.addAll(e);
                 }
@@ -588,7 +637,8 @@ public class BeanIndexer<K> {
          */
         public Search notHaving(String property, Object value)
                 throws IllegalArgumentException {
-            Set<K> notHaving = new HashSet<K>(getElements());
+            Set<K> notHaving = factory.createNewSet();
+            notHaving.addAll(BeanIndexer.this);
             notHaving.removeAll(havingResultSet(property, value));
             return search.add(notHaving);
         }
@@ -616,13 +666,14 @@ public class BeanIndexer<K> {
          */
         public Search notIn(String property, Set<? extends Object> values)
                 throws IllegalArgumentException {
-            Set<K> notIn = new HashSet<K>(getElements());
+            Set<K> notIn = factory.createNewSet();
+            notIn.addAll(BeanIndexer.this);
             notIn.removeAll(inResultSet(property, values));
             return search.add(notIn);
         }
 
         private Set<K> inResultSet(String property, Set<? extends Object> values) {
-            Set<K> set = new HashSet<K>();
+            Set<K> set = factory.createNewSet();
             for (Object v : values) {
                 set.addAll(havingResultSet(property, v));
             }
