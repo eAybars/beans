@@ -21,6 +21,7 @@ import java.util.NavigableMap;
 import java.util.NavigableSet;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * BeanIndexer is used to index bean properties and enable searching on those
@@ -166,7 +167,7 @@ public class BeanIndexer<K> extends AbstractSet<K> implements Set<K> {
     private Class<?> getPropertyClass(BeanProperty parent) {
         return parent == null ? beanClass
                 : (parent.isCollectionOrArrayType() ? parent
-                .getCollectionOrArrayType() : parent.getPropertyType());
+                        .getCollectionOrArrayType() : parent.getPropertyType());
     }
 
     private boolean isSortable(Class<?> clazz) {
@@ -185,14 +186,14 @@ public class BeanIndexer<K> extends AbstractSet<K> implements Set<K> {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public BeanIndexer<K> addSortedIndex(String property,
             Comparator<?> comparator) {
-        Map<Object, Set<K>> holder;
-        synchronized (this) {
-            holder = index.get(property);
-            if (holder == null) {
+        Map<Object, Set<K>> holder = index.get(property);
+        if (holder == null) {
+            if (index instanceof ConcurrentMap) {
+                ((ConcurrentMap<String, Map<Object, Set<K>>>) index).putIfAbsent(property, factory.createNewNavigableMap(comparator));
+            } else {
                 index.put(property, factory.createNewNavigableMap(comparator));
             }
-        }
-        if (holder != null) {
+        } else {
             if (holder instanceof NavigableMap<?, ?>) {
                 return this;
             } else {
@@ -215,14 +216,14 @@ public class BeanIndexer<K> extends AbstractSet<K> implements Set<K> {
      * @return
      */
     public BeanIndexer<K> addUnsortedIndex(String property) {
-        Map<Object, Set<K>> holder;
-        synchronized (this) {
-            holder = index.get(property);
-            if (holder == null) {
+        Map<Object, Set<K>> holder = index.get(property);
+        if (holder == null) {
+            if (index instanceof ConcurrentMap) {
+                ((ConcurrentMap<String, Map<Object, Set<K>>>) index).putIfAbsent(property, factory.createNewMap());
+            } else {
                 index.put(property, factory.createNewMap());
             }
-        }
-        if (holder != null) {
+        } else {
             if (!(holder instanceof NavigableMap<?, ?>)) {
                 return this;
             } else {
@@ -262,8 +263,11 @@ public class BeanIndexer<K> extends AbstractSet<K> implements Set<K> {
     private void addToMap(Map<Object, Set<K>> map, Object key, K element) {
         Set<K> collection = map.get(key);
         if (collection == null) {
-            collection = factory.createNewSet();
-            map.put(key, collection);
+            if (map instanceof ConcurrentMap) {
+                collection = ((ConcurrentMap<Object, Set<K>>) map).putIfAbsent(key, factory.createNewSet());
+            } else {
+                map.put(key, collection = factory.createNewSet());
+            }
         }
         collection.add(element);
     }
@@ -309,7 +313,11 @@ public class BeanIndexer<K> extends AbstractSet<K> implements Set<K> {
                     //or element has been modified after indexing is done
                     elementSet.remove(element);
                     if (elementSet.isEmpty()) {
-                        e.getValue().remove(value);
+                        if (e.getValue() instanceof ConcurrentMap) {
+                            ((ConcurrentMap) e.getValue()).remove(value, Collections.emptySet());
+                        } else {
+                            e.getValue().remove(value);
+                        }
                     }
                 }
             }
